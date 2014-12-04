@@ -14,6 +14,7 @@ import qualified Data.HashSet        as S
 import qualified Data.List           as L
 
 import Control.Applicative      ((<$>))
+import Data.IntMap              (IntMap)
 import Data.Monoid              (mconcat)
 import Data.Maybe               (catMaybes)
 
@@ -48,6 +49,7 @@ data CGEnv
         , trec  :: !(Maybe (M.HashMap F.Symbol SpecType)) -- ^ Type of recursive function with decreasing constraints
         , lcb   :: !(M.HashMap F.Symbol CoreExpr) -- ^ Let binding that have not been checked
         , holes :: !HEnv               -- ^ Types with holes, will need refreshing
+        , cg_bks :: !(IntMap SrcSpan)
         } -- deriving (Data, Typeable)
 
 instance PPrint CGEnv where

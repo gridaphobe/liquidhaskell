@@ -38,6 +38,7 @@ import Control.Monad.State
 
 import Control.Applicative      ((<$>))
 
+import Data.IntMap              (IntMap)
 import Data.Monoid              (mconcat, mempty, mappend)
 import Data.Maybe               (fromMaybe, catMaybes)
 import qualified Data.HashMap.Strict as M
@@ -179,6 +180,7 @@ measEnv sp xts cbs lts asms hs
         , trec  = Nothing
         , lcb   = M.empty
         , holes = fromListHEnv hs
+        , cg_bks = (sp_bks sp)
         } 
     where
       tce = tcEmbeds sp
@@ -203,8 +205,6 @@ grtyTop info     = forM topVs $ \v -> (v,) <$> (trueTy $ varType v) -- val $ var
 ------------------------------------------------------------------------
 -- | Helpers: Reading/Extending Environment Bindings -------------------
 ------------------------------------------------------------------------
-
-
 
 getTag :: CGEnv -> F.Tag
 getTag γ = maybe Tg.defaultTag (`Tg.getTag` (tgEnv γ)) (tgKey γ)
@@ -1191,7 +1191,7 @@ cconsE γ (Lam x e) (RFun y ty t _)
        addIdA x (AnnDef ty) 
 
 cconsE γ (Tick tt e) t   
-  = cconsE (γ `setLoc` tickSrcSpan tt) e t
+  = cconsE (γ `setLoc` tickSrcSpan (cg_bks γ) tt) e t
 
 cconsE γ e@(Cast e' _) t     
   = do t' <- castTy γ (exprType e) e'
@@ -1270,7 +1270,7 @@ consE γ e'@(App e a)
        te0              <- instantiatePreds γ e' $ foldr RAllP te πs 
        te'              <- instantiateStrata ls te0
        (γ', te'')       <- dropExists γ te'
-       updateLocA πs (exprLoc e) te'' 
+       updateLocA πs (exprLoc (cg_bks γ) e) te'' 
        let RFun x tx t _ = checkFun ("Non-fun App with caller ", e') te''
        pushConsBind      $ cconsE γ' a tx 
        addPost γ'        $ maybe (checkUnbound γ' e' x t) (F.subst1 t . (x,)) (argExpr γ a)
@@ -1310,7 +1310,7 @@ consE γ (Tick tt e)
   = do t <- consE (γ `setLoc` l) e
        addLocA Nothing l (AnnUse t)
        return t
-    where l = tickSrcSpan tt
+    where l = tickSrcSpan (cg_bks γ) tt
 
 consE γ e@(Cast e' _)      
   = castTy γ (exprType e) e'
@@ -1532,7 +1532,7 @@ subsTyVar_meet' (α, t) = subsTyVar_meet (α, toRSort t, t)
 -----------------------------------------------------------------------
 
 instance NFData CGEnv where
-  rnf (CGE x1 x2 x3 x5 x6 x7 x8 x9 _ _ x10 _ _ _ _)
+  rnf (CGE x1 x2 x3 x5 x6 x7 x8 x9 _ _ x10 _ _ _ _ _)
     = x1 `seq` rnf x2 `seq` seq x3 `seq` rnf x5 `seq` 
       rnf x6  `seq` x7 `seq` rnf x8 `seq` rnf x9 `seq` rnf x10
 
@@ -1624,11 +1624,11 @@ fFromRConc _           = errorstar "can not hanlde existential type with kvars"
 -------------------- Cleaner Signatures For Rec-bindings ----------------------
 -------------------------------------------------------------------------------
 
-exprLoc                         :: CoreExpr -> Maybe SrcSpan
+exprLoc                         :: IntMap SrcSpan -> CoreExpr -> Maybe SrcSpan
 
-exprLoc (Tick tt _)             = Just $ tickSrcSpan tt
-exprLoc (App e a) | isType a    = exprLoc e
-exprLoc _                       = Nothing
+exprLoc bks (Tick tt _)             = Just $ tickSrcSpan bks tt
+exprLoc bks (App e a) | isType a    = exprLoc bks e
+exprLoc _   _                       = Nothing
 
 isType (Type _)                 = True
 isType a                        = eqType (exprType a) predType

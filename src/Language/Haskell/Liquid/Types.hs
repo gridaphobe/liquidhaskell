@@ -210,6 +210,7 @@ import Control.Applicative                      ((<$>))
 import Data.Typeable                            (Typeable)
 import Data.Generics                            (Data)   
 import Data.Monoid                              hiding ((<>))
+import Data.IntMap                              (IntMap)
 import qualified  Data.Foldable as F
 import            Data.Hashable
 import qualified  Data.HashMap.Strict as M
@@ -353,6 +354,7 @@ data GhcSpec = SP {
   , exports    :: !NameSet                       -- ^ `Name`s exported by the module being verified
   , measures   :: [Measure SpecType DataCon]
   , tyconEnv   :: M.HashMap TyCon RTyCon
+  , sp_bks     :: !(IntMap SrcSpan)
   }
 
 

@@ -37,6 +37,7 @@ import            SrcLoc
 import            Var 
 import qualified  Data.HashSet                  as S    
 import qualified  Data.HashMap.Strict           as M    
+import            Data.IntMap                      (IntMap)
 import qualified  Data.List                     as L
 import            System.Directory                (copyFile, doesFileExist)
 import            Language.Fixpoint.Types         (FixResult (..))
@@ -84,27 +85,27 @@ instance Show Def where
 --    file which correspond to top-level binders whose code has changed 
 --    and their transitive dependencies.
 -------------------------------------------------------------------------
-slice :: FilePath -> [CoreBind] -> IO (Maybe DiffCheck)
+slice :: FilePath -> IntMap SrcSpan -> [CoreBind] -> IO (Maybe DiffCheck)
 -------------------------------------------------------------------------
-slice target cbs = ifM (doesFileExist saved) (Just <$> dc) (return Nothing)
+slice target bks cbs = ifM (doesFileExist saved) (Just <$> dc) (return Nothing)
   where 
     saved        = extFileName Saved target
-    dc           = sliceSaved target saved cbs 
+    dc           = sliceSaved target saved bks cbs 
 
-sliceSaved :: FilePath -> FilePath -> [CoreBind] -> IO DiffCheck
-sliceSaved target saved cbs 
+sliceSaved :: FilePath -> FilePath -> IntMap SrcSpan -> [CoreBind] -> IO DiffCheck
+sliceSaved target saved bks cbs 
   = do (is, lm) <- lineDiff target saved
        res      <- loadResult target
-       return    $ sliceSaved' is lm (DC cbs res) 
+       return    $ sliceSaved' bks is lm (DC cbs res) 
 
-sliceSaved'          :: [Int] -> LMap -> DiffCheck -> DiffCheck
-sliceSaved' is lm dc = DC cbs' res'
+sliceSaved'          :: IntMap SrcSpan -> [Int] -> LMap -> DiffCheck -> DiffCheck
+sliceSaved' bks is lm dc = DC cbs' res'
   where
     cbs'             = thin cbs $ diffVars is dfs
     res'             = adjustOutput lm cm res
     cm               = checkedItv chDfs
-    dfs              = coreDefs cbs
-    chDfs            = coreDefs cbs'
+    dfs              = coreDefs bks cbs
+    chDfs            = coreDefs bks cbs'
     DC cbs res       = dc
 
 -- | @thin@ returns a subset of the @[CoreBind]@ given which correspond
@@ -127,12 +128,12 @@ filterBinds cbs ys = filter f cbs
 
 
 -------------------------------------------------------------------------
-coreDefs     :: [CoreBind] -> [Def]
+coreDefs     :: IntMap SrcSpan -> [CoreBind] -> [Def]
 -------------------------------------------------------------------------
-coreDefs cbs = L.sort [D l l' x | b <- cbs, (l, l') <- coreDef b, x <- bindersOf b]
-coreDef b    = meetSpans b eSp vSp 
+coreDefs bks cbs = L.sort [D l l' x | b <- cbs, (l, l') <- coreDef bks b, x <- bindersOf b]
+coreDef bks b    = meetSpans b eSp vSp 
   where 
-    eSp      = lineSpan b $ catSpans b $ bindSpans b 
+    eSp      = lineSpan b $ catSpans b $ bindSpans bks b 
     vSp      = lineSpan b $ catSpans b $ getSrcSpan <$> bindersOf b
     
 
@@ -167,26 +168,26 @@ varFile b = case getSrcSpan b of
               _             -> error $ "DIFFCHECK: getFile: no file found for: " ++ showPpr b
 
 
-bindSpans (NonRec x e)    = getSrcSpan x : exprSpans e
-bindSpans (Rec    xes)    = map getSrcSpan xs ++ concatMap exprSpans es
+bindSpans bks (NonRec x e)    = getSrcSpan x : exprSpans bks e
+bindSpans bks (Rec    xes)    = map getSrcSpan xs ++ concatMap (exprSpans bks) es
   where 
     (xs, es)              = unzip xes
 
-exprSpans (Tick t e)
-  | isJunkSpan sp         = exprSpans e
+exprSpans bks (Tick t e)
+  | isJunkSpan sp         = exprSpans bks e
   | otherwise             = [sp]
   where
-    sp                    = tickSrcSpan t
-    
-exprSpans (Var x)         = [getSrcSpan x]
-exprSpans (Lam x e)       = getSrcSpan x : exprSpans e 
-exprSpans (App e a)       = exprSpans e ++ exprSpans a 
-exprSpans (Let b e)       = bindSpans b ++ exprSpans e
-exprSpans (Cast e _)      = exprSpans e
-exprSpans (Case e x _ cs) = getSrcSpan x : exprSpans e ++ concatMap altSpans cs 
-exprSpans _               = [] 
+    sp                    = tickSrcSpan bks t
 
-altSpans (_, xs, e)       = map getSrcSpan xs ++ exprSpans e
+exprSpans _   (Var x)         = [getSrcSpan x]
+exprSpans bks (Lam x e)       = getSrcSpan x : exprSpans bks e 
+exprSpans bks (App e a)       = exprSpans bks e ++ exprSpans bks a 
+exprSpans bks (Let b e)       = bindSpans bks b ++ exprSpans bks e
+exprSpans bks (Cast e _)      = exprSpans bks e
+exprSpans bks (Case e x _ cs) = getSrcSpan x : exprSpans bks e ++ concatMap (altSpans bks) cs 
+exprSpans _   _               = []
+
+altSpans bks (_, xs, e)       = map getSrcSpan xs ++ exprSpans bks e
 
 isJunkSpan (RealSrcSpan _) = False
 isJunkSpan _               = True

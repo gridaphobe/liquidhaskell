@@ -122,7 +122,7 @@ makeGhcSpec' cfg cbs vars defVars exports specs
          >>= makeGhcSpec4 defVars specs name su 
 
 emptySpec     :: Config -> GhcSpec
-emptySpec cfg = SP [] [] [] [] [] [] [] [] [] mempty [] [] [] [] mempty mempty cfg mempty [] mempty 
+emptySpec cfg = SP [] [] [] [] [] [] [] [] [] mempty [] [] [] [] mempty mempty cfg mempty [] mempty mempty
 
 
 makeGhcSpec0 cfg defVars exports name sp

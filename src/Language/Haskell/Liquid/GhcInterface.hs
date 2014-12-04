@@ -28,7 +28,6 @@ import CoreSyn
 import Var
 import CoreMonad    (liftIO)
 import DataCon
-import Language.Haskell.Liquid.Desugar.HscMain (hscDesugarWithLoc) 
 import qualified Control.Exception as Ex
 
 import GHC.Paths (libdir)
@@ -129,23 +128,25 @@ derivedVs cbs fd = concatMap bindersOf cbf ++ deps
 
 updateDynFlags cfg
   = do df <- getSessionDynFlags
-       let df' = df { importPaths  = idirs cfg ++ importPaths df
-                    , libraryPaths = idirs cfg ++ libraryPaths df
-                    , includePaths = idirs cfg ++ includePaths df
-                    , profAuto     = ProfAutoCalls
-                    , ghcLink      = LinkInMemory
-                    --FIXME: this *should* be HscNothing, but that prevents us from
-                    -- looking up *unexported* names in another source module..
-                    , hscTarget    = HscInterpreted -- HscNothing
-                    , ghcMode      = CompManager
-                    -- prevent GHC from printing anything
-                    , log_action   = \_ _ _ _ _ -> return ()
-                    -- , verbosity = 3
-                    } `xopt_set` Opt_MagicHash
-                  --     `gopt_set` Opt_Hpc
-                      `gopt_set` Opt_ImplicitImportQualified
-                      `gopt_set` Opt_PIC
-       (df'',_,_) <- parseDynamicFlags df' (map noLoc $ ghcOptions cfg)
+       (df',_,_) <- parseDynamicFlags df (map noLoc $ ghcOptions cfg)
+       let df'' = df' { importPaths  = idirs cfg ++ importPaths df
+                      , libraryPaths = idirs cfg ++ libraryPaths df
+                      , includePaths = idirs cfg ++ includePaths df
+                      -- , profAuto     = ProfAutoCalls
+                      -- , ways         = [WayProf]
+                      , ghcLink      = NoLink -- LinkInMemory
+                      --FIXME: this *should* be HscNothing, but that prevents us from
+                      -- looking up *unexported* names in another source module..
+                      , hscTarget    = HscNothing -- HscInterpreted -- HscNothing
+                      , ghcMode      = CompManager
+                      -- prevent GHC from printing anything
+                      , log_action   = \_ _ _ _ _ -> return ()
+                      -- , verbosity = 3
+                      } `xopt_set` Opt_MagicHash
+                        `gopt_set` Opt_Hpc
+                        -- `gopt_set` Opt_SccProfilingOn
+                        `gopt_set` Opt_ImplicitImportQualified
+                        `gopt_set` Opt_PIC
        setSessionDynFlags $ df'' -- {profAuto = ProfAutoAll}
 
 compileCFiles cfg
@@ -179,9 +180,12 @@ getGhcModGuts1 fn = do
      Just modSummary -> do
        -- mod_guts <- modSummaryModGuts modSummary
        mod_p    <- parseModule modSummary
-       mod_guts <- coreModule <$> (desugarModuleWithLoc =<< typecheckModule (ignoreInline mod_p))
-       let deriv = getDerivedDictionaries mod_guts 
-       return   $! (miModGuts (Just deriv) mod_guts)
+       mod_guts <- coreModule <$> (desugarModule =<< typecheckModule (ignoreInline mod_p))
+       let deriv = getDerivedDictionaries mod_guts
+       df       <- getDynFlags
+       hpc      <- liftIO $ getSpans df (moduleName $ mg_module mod_guts)
+       liftIO $ print hpc
+       return   $! (miModGuts (Just deriv) mod_guts hpc)
      Nothing     -> exitWithPanic "Ghc Interface: Unable to get GhcModGuts"
 
 getDerivedDictionaries cm = is_dfun <$> (instEnvElts $ mg_inst_env cm)
@@ -201,15 +205,15 @@ removeFileIfExists f = doesFileExist f >>= (`when` removeFile f)
 -- | Desugaring (Taken from GHC, modified to hold onto Loc in Ticks) -----------
 --------------------------------------------------------------------------------
 
-desugarModuleWithLoc :: TypecheckedModule -> Ghc DesugaredModule
-desugarModuleWithLoc tcm = do
-  let ms = pm_mod_summary $ tm_parsed_module tcm 
-  -- let ms = modSummary tcm
-  let (tcg, _) = tm_internals_ tcm
-  hsc_env <- getSession
-  let hsc_env_tmp = hsc_env { hsc_dflags = ms_hspp_opts ms }
-  guts <- liftIO $ hscDesugarWithLoc hsc_env_tmp ms tcg
-  return $ DesugaredModule { dm_typechecked_module = tcm, dm_core_module = guts }
+-- desugarModuleWithLoc :: TypecheckedModule -> Ghc DesugaredModule
+-- desugarModuleWithLoc tcm = do
+--   let ms = pm_mod_summary $ tm_parsed_module tcm 
+--   -- let ms = modSummary tcm
+--   let (tcg, _) = tm_internals_ tcm
+--   hsc_env <- getSession
+--   let hsc_env_tmp = hsc_env { hsc_dflags = ms_hspp_opts ms }
+--   guts <- liftIO $ hscDesugarWithLoc hsc_env_tmp ms tcg
+--   return $ DesugaredModule { dm_typechecked_module = tcm, dm_core_module = guts }
 
 --------------------------------------------------------------------------------
 -- | Extracting Qualifiers -----------------------------------------------------
@@ -237,7 +241,8 @@ moduleSpec cfg cbs vars defVars target mg tgtSpec impSpecs
                                            , x <- Ms.imports spec
                                            ]
        ghcSpec    <- liftIO $ makeGhcSpec cfg target cbs vars defVars exports env specs
-       return      (ghcSpec, imps, Ms.includes tgtSpec)
+       let ghcSpec' = ghcSpec { sp_bks = mgi_breaks mg }
+       return      (ghcSpec', imps, Ms.includes tgtSpec)
     where
       exports    = mgi_exports mg
       impNames   = map (getModString.fst) impSpecs

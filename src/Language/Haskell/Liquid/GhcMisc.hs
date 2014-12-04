@@ -40,6 +40,9 @@ import           HscTypes                     (HscEnv(..), FindResult(..))
 import           FastString
 import           TcRnDriver
 
+import Trace.Hpc.Mix
+import Trace.Hpc.Util
+
 import           RdrName
 import           Type                         (liftedTypeKind)
 import           TypeRep
@@ -49,6 +52,8 @@ import           Data.Char                    (isLower, isSpace)
 import           Data.Monoid                  (mempty)
 import           Data.Hashable
 import qualified Data.HashSet                 as S
+import qualified Data.IntMap                  as IntMap
+import           Data.IntMap                  (IntMap)
 import qualified Data.List                    as L
 import           Data.Aeson                 
 import qualified Data.Text.Encoding           as T
@@ -75,9 +80,10 @@ data MGIModGuts = MI {
   , mgi_fam_insts :: ![FamInst]
   , mgi_exports   :: !NameSet
   , mgi_is_dfun   :: !(Maybe [DFunId])
+  , mgi_breaks    :: !(IntMap SrcSpan)
   }
 
-miModGuts dids mg = MI {
+miModGuts dids mg hpc = MI {
     mgi_binds     = mg_binds mg
   , mgi_module    = mg_module mg
   , mgi_deps      = mg_deps mg
@@ -87,7 +93,23 @@ miModGuts dids mg = MI {
   , mgi_fam_insts = mg_fam_insts mg
   , mgi_exports   = availsToNameSet $ mg_exports mg
   , mgi_is_dfun   = dids
+  , mgi_breaks    = hpc -- IntMap.fromList $ Array.assocs $ modBreaks_locs $ mg_modBreaks mg
   }
+
+getSpans :: DynFlags -> ModuleName -> IO (IntMap SrcSpan)
+getSpans df modName = do
+  mixEntries <- getMixEntries modName (hpcDir df) 
+                  -- `catch` \(_ :: SomeException) -> return []
+  return $ IntMap.fromList $ zip [0..] mixEntries
+
+
+getMixEntries :: ModuleName -> FilePath -> IO [SrcSpan]
+getMixEntries nm dir = do
+  Mix file _ _ _ entries <- readMix [dir] (Left $ moduleNameString nm)
+  let f = fsLit file
+  return [ mkSrcSpan (mkSrcLoc f l1 c1) (mkSrcLoc f l2 c2) 
+         | (hpc, _) <- entries, let (l1,c1,l2,c2) = fromHpcPos hpc 
+         ]
 
 -----------------------------------------------------------------------
 --------------- Generic Helpers for Encoding Location -----------------
@@ -97,9 +119,13 @@ srcSpanTick :: Module -> SrcSpan -> Tickish a
 srcSpanTick m loc
   = ProfNote (AllCafsCC m loc) False True
 
-tickSrcSpan ::  Outputable a => Tickish a -> SrcSpan
-tickSrcSpan (ProfNote cc _ _) = cc_loc cc
-tickSrcSpan _                 = noSrcSpan 
+tickSrcSpan ::  Outputable a => IntMap SrcSpan -> Tickish a -> SrcSpan
+-- tickSrcSpan bks (ProfNote cc _ _) = cc_loc cc
+-- tickSrcSpan bks (Breakpoint i _)  = IntMap.findWithDefault noSrcSpan i bks
+tickSrcSpan bks  (HpcTick _ i)     = IntMap.findWithDefault noSrcSpan i bks
+tickSrcSpan _bks _z                = noSrcSpan -- errorstar msg
+--   where msg = "tickSrcSpan: unhandled tick: " ++ showPpr z
+
 -----------------------------------------------------------------------
 --------------- Generic Helpers for Accessing GHC Innards -------------
 -----------------------------------------------------------------------
