@@ -7,14 +7,17 @@ module Language.Haskell.Liquid.Parse
   where
 
 import Control.Monad
-import Text.Parsec
+import Control.Monad.Identity
+import Text.Parsec hiding (spaces)
 import Text.Parsec.Error (newErrorMessage, Message (..)) 
-import Text.Parsec.Pos   (newPos) 
+import Text.Parsec.Pos   (newPos)
+import qualified Text.Parsec.IndentParsec as IP
 
 import qualified Text.Parsec.Token as Token
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet        as S
 import Data.Monoid
+import qualified Data.Text as T
 
 import Control.Applicative ((<$>), (<*), (*>), (<*>))
 import Data.Char (isLower, isSpace, isAlpha)
@@ -35,7 +38,7 @@ import Language.Haskell.Liquid.Variance
 import qualified Language.Haskell.Liquid.Measure as Measure
 import Language.Fixpoint.Names (listConName, hpropConName, propConName, tupConName, headSym)
 import Language.Fixpoint.Misc hiding (dcolon, dot)
-import Language.Fixpoint.Parse hiding (angles)
+import Language.Fixpoint.Parse
 
 ----------------------------------------------------------------------------
 -- Top Level Parsing API ---------------------------------------------------
@@ -87,7 +90,7 @@ specificationP
 parseWithError :: Parser a -> SourceName -> String -> Either Error a 
 ---------------------------------------------------------------------------
 parseWithError parser f s
-  = case runParser (whiteSpace *> parser <* whiteSpace <* eof) 0 f s of
+  = case runIdentity (IP.runGIPT (whiteSpace *> parser <* whiteSpace <* eof) 0 f s) of
       Left e  -> Left  $ parseErrorError f e
       Right r -> Right $ r
       -- Right (_, rem, _) -> Left  $ parseErrorError f $ remParseError f s rem 
@@ -148,9 +151,13 @@ toLogicOneP
 -- Lexer Tokens ------------------------------------------------------------------
 ----------------------------------------------------------------------------------
 
-dot           = Token.dot           lexer
-angles        = Token.angles        lexer
-stringLiteral = Token.stringLiteral lexer
+-- dot           = Token.dot           lexer
+-- angles        = Token.angles        lexer
+-- stringLiteral = Token.stringLiteral lexer
+
+dot    = IP.dot lexer
+spaces = whiteSpace
+stringLiteral = IP.stringLiteral lexer
 
 ----------------------------------------------------------------------------------
 -- BareTypes ---------------------------------------------------------------------
@@ -272,7 +279,7 @@ constraintP
     <?> "constraint"
 
 constraintEnvP
-   =  try (do xts <- sepBy tyBindP comma
+   =  try (do xts <- sepBy tyBindPNoIndent comma
               reservedOp "|-"
               return xts)
   <|> return []
@@ -423,7 +430,6 @@ funArgsP  = try realP <|> empP
     realP = do EApp lp xs <- funAppP
                return (val lp, xs) 
 
-  
 
 ------------------------------------------------------------------------
 ----------------------- Wrapped Constructors ---------------------------
@@ -556,8 +562,8 @@ mkSpec name xs         = (name,)
   }
 
 specP :: Parser (Pspec BareType LocSymbol)
-specP 
-  = try (reserved "assume"    >> liftM Assm   tyBindP   )
+specP = --foldedLinesOf $
+        try (reserved "assume"    >> liftM Assm   tyBindP   )
     <|> (reserved "assert"    >> liftM Asrt   tyBindP   )
     <|> (reserved "Local"     >> liftM LAsrt  tyBindP   )
     <|> try (reserved "measure"  >> liftM Meas   measureP  ) 
@@ -617,10 +623,13 @@ varianceP = (reserved "bivariant"     >> return Bivariant)
         <?> "Invalid variance annotation\t Use one of bivariant, invariant, covariant, contravariant"
 
 tyBindsP    :: Parser ([LocSymbol], (BareType, Maybe [Expr]))
-tyBindsP = xyP (sepBy (locParserP binderP) comma) dcolon termBareTypeP
+tyBindsP = foldedLinesOf $ xyP (sepBy (locParserP binderP) comma) dcolon termBareTypeP
 
 tyBindP    :: Parser (LocSymbol, BareType)
-tyBindP    = xyP (locParserP binderP) dcolon genBareTypeP
+tyBindP    = foldedLinesOf $ xyP (locParserP binderP) dcolon genBareTypeP
+
+tyBindPNoIndent :: Parser (LocSymbol, BareType)
+tyBindPNoIndent = xyP (locParserP binderP) dcolon genBareTypeP
 
 termBareTypeP :: Parser (BareType, Maybe [Expr])
 termBareTypeP
@@ -746,27 +755,30 @@ binderP    =  try $ symbol <$> idP badc
 grabs = many
 
 measureDefP :: Symbol -> Parser Body -> Parser (Def LocSymbol)
-measureDefP mname bodyP
-  = do Loc l _ <- locParserP $ reserved $ symbolString mname
+measureDefP mname bodyP = foldedLinesOf $
+    do Loc l _ <- locParserP $ reserved $ symbolString mname
        (c, xs) <- measurePatP
        reservedOp "="
        body    <- bodyP 
-       whiteSpace
        let xs'  = (symbol . val) <$> xs
        return   $ Def (Loc l mname) (symbol <$> c) xs' body
 
 measurePatP :: Parser (LocSymbol, [LocSymbol])
 measurePatP 
-  =  try tupPatP 
- <|> try (parens conPatP)
- <|> try (parens consPatP)
- <|>     (parens nilPatP)
+  =  parens (try conPatP <|> try consPatP <|> nilPatP <|> tupPatP)
+ <|> nullaryConPatP
+--   =  try tupPatP 
+--  <|> try (parens conPatP)
+--  <|> try (parens consPatP)
+--  <|>     (parens nilPatP)
 -- <?> "measure pattern"
 
-tupPatP  = mkTupPat  <$> (parens       $  sepBy locLowerIdP comma)
+tupPatP  = mkTupPat  <$> sepBy1 locLowerIdP comma
 conPatP  = (,)       <$> locParserP dataConNameP <*> sepBy locLowerIdP whiteSpace
 consPatP = mkConsPat <$> locLowerIdP  <*> colon <*> locLowerIdP
-nilPatP  = mkNilPat  <$> brackets whiteSpace 
+nilPatP  = mkNilPat  <$> brackets whiteSpace
+
+nullaryConPatP = nilPatP <|> ((,[]) <$> locParserP dataConNameP)
 
 mkTupPat zs     = (tupDataCon (length zs), zs)
 mkNilPat _      = (dummyLoc "[]", []    )
@@ -830,12 +842,9 @@ dataDeclP :: Parser DataDecl
 dataDeclP
   = do pos <- getPosition
        x   <- locUpperIdP
-       spaces
        fsize <- dataSizeP
-       spaces
        ts  <- sepBy tyVarIdP spaces
        ps  <- predVarDefsP
-       whiteSpace
        dcs <- do reservedOp "="
                  sepBy dataConP (reservedOp "|")
               <|> return []
@@ -854,11 +863,11 @@ grabUpto p
 betweenMany leftP rightP p 
   = do z <- grabUpto leftP
        case z of
-         Just _  -> liftM2 (:) (between leftP rightP p) (betweenMany leftP rightP p)
+         Just _  -> liftM2 (:) (IP.between leftP rightP p) (betweenMany leftP rightP p)
          Nothing -> return []
 
 -- specWrap  = between     (string "{-@" >> spaces) (spaces >> string "@-}")
-specWraps = betweenMany (string "{-@" >> spaces) (spaces >> string "@-}")
+specWraps = betweenMany (reservedOp "{-@" >> spaces) (spaces >> reservedOp "@-}")
 
 ---------------------------------------------------------------
 -- | Bundling Parsers into a Typeclass ------------------------
